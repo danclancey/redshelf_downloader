@@ -4,19 +4,21 @@ import re
 import pdfkit
 import pymupdf
 import threading
+import queue
 from requests.adapters import HTTPAdapter, Retry
 from pathlib import Path
+import subprocess
 
-NUM_THREADS = 1
+NUM_THREADS = 8 
 PAGE_PATH = "pages"
 COOKIES = {
     "AMP_d698e26b82": "",
     "AMP_MKTG_d698e26b82": "",
     "csrftoken": "",
-    "session_id": ""
+    "session_id": "yrdt3jw6cbj4ytqezyyw77dbnco32cye"
 }
-NUM_PAGES = 1
-BOOK_URL = "https://platform.virdocs.com/spine/XXXXXXX/{}"
+NUM_PAGES = 1802
+BOOK_URL = "https://platform.virdocs.com/spine/XXXXXXXI{}"
 
 if not os.path.exists(PAGE_PATH):
     os.mkdir(PAGE_PATH)
@@ -47,11 +49,6 @@ def get_remote_urls(raw: str) -> list[str]:
 
     remote = []
 
-    # The format for the remote url is as follows:
-    # /path/to/resource
-    # The src/href that the regex picks up can come in different formats. For example:
-    # 1. ../path/to/resource
-    # 2. path/to/resource
     for css in css:
         parsed = css.group(1).replace("..", "")
         if parsed[0] != "/":
@@ -75,7 +72,6 @@ def download_remote_resources(page: int, base_url: str, urls: list[str]):
 
     for url in urls:
         request_url = url
-        # Static is a universal file not dependent on the book.
         if "/static" in url:
             request_url = f"https://platform.virdocs.com{url}"
         else:
@@ -88,11 +84,6 @@ def download_remote_resources(page: int, base_url: str, urls: list[str]):
 
 
 def create_html_file(page: int, raw: str):
-    # The format for the path to the file is as follows:
-    # ../path/to/resource
-    # The page can have different formats for a file. For example:
-    # 1. /path/to/resource
-    # 2. path/to/resource
     def parse_downloaded_file(match: re.Match[str]) -> str:
         parsed = match.group(1)
 
@@ -130,15 +121,23 @@ def convert_html_to_pdf(page: int):
     html = Path(f"{PAGE_PATH}/{page}/html/{page}.html").read_text(encoding="utf-8")
 
     def make_path(property: str, file_path: str) -> str:
+        # Construct absolute paths for local resources
         path = os.path.abspath(Path(f"{PAGE_PATH}/{page}/{file_path}"))
-        return f"{property}=\"{path}\""
+        if not os.path.exists(path):
+            print(f"Warning: {property}='{file_path}' not found at {path}")
+            return f'{property}="{file_path}"'  # Fallback to the original path if file not found
+        print(f'Converting {property}="{file_path}" to {property}="file://{path}"')
+        return f'{property}="file://{path}"'
 
-    # Make hrefs absolute
-    html = re.sub("href=\"([.]{2})(.*?)\"", lambda match : make_path("href", match.group(2)), html)
-    # Make srcs absolute
-    html = re.sub("src=\"([.]{2})(.*?)\"", lambda match : make_path("src", match.group(2)), html)
+    # Make hrefs and srcs absolute to allow access to local resources
+    html = re.sub('href="([.]{2})(.*?)"', lambda match: make_path("href", match.group(2)), html)
+    html = re.sub('src="([.]{2})(.*?)"', lambda match: make_path("src", match.group(2)), html)
 
-    pdfkit.from_string(html, str(Path(f"{PAGE_PATH}/{page}/{page}.pdf")), options={"enable-local-file-access": ""})
+    # Convert HTML to PDF using wkhtmltopdf with stderr output capture
+    try:
+        pdfkit.from_string(html, str(Path(f"{PAGE_PATH}/{page}/{page}.pdf")), options={"enable-local-file-access": True})
+    except OSError as e:
+        print(f"Error converting page {page} to PDF: {str(e)}")
 
 
 def merge_pdf_files():
@@ -150,42 +149,59 @@ def merge_pdf_files():
     main_pdf.save("result.pdf")
 
 
-def download_thread(start: int, end: int):
-    for i in range(start, end):
-        print(f"[{threading.current_thread().name}] Downloading page {i}")
-        download_page(i)
+# Dynamic distribution using queue
+page_queue = queue.Queue()
 
+# Queue all pages to be downloaded
+for page in range(1, NUM_PAGES + 1):
+    page_queue.put(page)
 
-def convert_thread(start: int, end: int):
-    for i in range(start, end):
-        print(f"[{threading.current_thread().name}] Converting page {i} to PDF")
-        convert_html_to_pdf(i)
+def download_thread():
+    while not page_queue.empty():
+        page = page_queue.get()
+        try:
+            print(f"[{threading.current_thread().name}] Downloading page {page}")
+            download_page(page)
+        finally:
+            page_queue.task_done()
 
-
-assert(NUM_PAGES % NUM_THREADS == 0)
-chunk_size = int(NUM_PAGES / NUM_THREADS)
-
-# Download threads
-threads: list[threading.Thread] = []
-start = 1
-for i in range(0, NUM_THREADS):
-    thread = threading.Thread(target=download_thread, args=(start, start + chunk_size))
+# Start download threads
+threads = []
+for _ in range(NUM_THREADS):
+    thread = threading.Thread(target=download_thread)
     thread.start()
-    start += chunk_size
     threads.append(thread)
 
+# Wait for all downloads to complete
 for thread in threads:
     thread.join()
 
-# Convert threads
+print("Download Complete")
+
+# Convert pages with dynamic distribution
+page_queue = queue.Queue()
+
+# Queue all pages for PDF conversion
+for page in range(1, NUM_PAGES + 1):
+    page_queue.put(page)
+
+def convert_thread():
+    while not page_queue.empty():
+        page = page_queue.get()
+        try:
+            print(f"[{threading.current_thread().name}] Converting page {page} to PDF")
+            convert_html_to_pdf(page)
+        finally:
+            page_queue.task_done()
+
+# Start conversion threads
 threads = []
-start = 1
-for i in range(0, NUM_THREADS):
-    thread = threading.Thread(target=convert_thread, args=(start, start + chunk_size))
+for _ in range(NUM_THREADS):
+    thread = threading.Thread(target=convert_thread)
     thread.start()
-    start += chunk_size
     threads.append(thread)
 
+# Wait for conversions to complete
 for thread in threads:
     thread.join()
 
