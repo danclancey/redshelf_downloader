@@ -15,9 +15,9 @@ COOKIES = {
     "AMP_d698e26b82": "",
     "AMP_MKTG_d698e26b82": "",
     "csrftoken": "",
-    "session_id": "yrdt3jw6cbj4ytqezyyw77dbnco32cye"
+    "session_id": ""
 }
-NUM_PAGES = 1802
+NUM_PAGES = 1
 BOOK_URL = "https://platform.virdocs.com/spine/XXXXXXXI{}"
 
 if not os.path.exists(PAGE_PATH):
