@@ -6,6 +6,7 @@ import pymupdf
 import threading
 import queue
 from requests.adapters import HTTPAdapter, Retry
+from PyPDF2 import PdfMerger
 from pathlib import Path
 import subprocess
 
@@ -18,7 +19,7 @@ COOKIES = {
     "session_id": ""
 }
 NUM_PAGES = 1
-BOOK_URL = "https://platform.virdocs.com/spine/XXXXXXXI{}"
+BOOK_URL = "https://platform.virdocs.com/spine/XXXXXXX/{}"
 
 if not os.path.exists(PAGE_PATH):
     os.mkdir(PAGE_PATH)
@@ -118,36 +119,68 @@ def download_page(page: int):
 
 
 def convert_html_to_pdf(page: int):
-    html = Path(f"{PAGE_PATH}/{page}/html/{page}.html").read_text(encoding="utf-8")
+    html_file = Path(f"{PAGE_PATH}/{page}/html/{page}.html")
+    html = html_file.read_text(encoding="utf-8")
 
-    def make_path(property: str, file_path: str) -> str:
-        # Construct absolute paths for local resources
-        path = os.path.abspath(Path(f"{PAGE_PATH}/{page}/{file_path}"))
-        if not os.path.exists(path):
-            print(f"Warning: {property}='{file_path}' not found at {path}")
+    def make_absolute_path(property: str, file_path: str) -> str:
+        if file_path.startswith('http://') or file_path.startswith('https://'):
+            return f'{property}="{file_path}"'  # Leave external URLs unchanged
+
+        if file_path.startswith('#') or file_path.startswith('?#'):
+            return f'{property}="{file_path}"'  # Leave internal links unchanged
+
+        # Remove leading slashes to make the path relative
+        relative_file_path = file_path.lstrip('/')
+
+        # Resolve the path relative to the HTML file
+        base_path = html_file.parent
+        full_path = (base_path / relative_file_path).resolve()
+
+        if not full_path.exists():
+            print(f"Warning: {property}='{file_path}' not found at {full_path}")
             return f'{property}="{file_path}"'  # Fallback to the original path if file not found
-        print(f'Converting {property}="{file_path}" to {property}="file://{path}"')
-        return f'{property}="file://{path}"'
 
-    # Make hrefs and srcs absolute to allow access to local resources
-    html = re.sub('href="([.]{2})(.*?)"', lambda match: make_path("href", match.group(2)), html)
-    html = re.sub('src="([.]{2})(.*?)"', lambda match: make_path("src", match.group(2)), html)
+        print(f'Converting {property}="{file_path}" to {property}="file://{full_path}"')
+        return f'{property}="file://{full_path}"'
 
-    # Convert HTML to PDF using wkhtmltopdf with stderr output capture
+    # Update all href and src attributes to have absolute paths
+    html = re.sub(r'(href|src)="([^"]+)"', lambda match: make_absolute_path(match.group(1), match.group(2)), html)
+
+    # Convert HTML to PDF using wkhtmltopdf
     try:
-        pdfkit.from_string(html, str(Path(f"{PAGE_PATH}/{page}/{page}.pdf")), options={"enable-local-file-access": True})
+        pdfkit.from_string(html, str(Path(f"{PAGE_PATH}/{page}/{page}.pdf")), options={"enable-local-file-access": ""})
     except OSError as e:
         print(f"Error converting page {page} to PDF: {str(e)}")
 
+from PyPDF2 import PdfMerger
+from pathlib import Path
 
 def merge_pdf_files():
-    main_pdf = pymupdf.open(Path(f"{PAGE_PATH}/1/1.pdf"))
+    batch_size = 100  # Adjust based on available memory
+    total_batches = (NUM_PAGES + batch_size - 1) // batch_size
+    intermediate_files = []
 
-    for i in range(2, NUM_PAGES + 1):
-        main_pdf.insert_pdf(pymupdf.open(Path(f"{PAGE_PATH}/{i}/{i}.pdf")))
+    for batch_num in range(total_batches):
+        merger = PdfMerger()
+        start_page = batch_num * batch_size + 1
+        end_page = min(start_page + batch_size, NUM_PAGES + 1)
 
-    main_pdf.save("result.pdf")
+        for i in range(start_page, end_page):
+            pdf_path = Path(f"{PAGE_PATH}/{i}/{i}.pdf")
+            merger.append(str(pdf_path))
 
+        intermediate_file = f"intermediate_{batch_num}.pdf"
+        merger.write(intermediate_file)
+        merger.close()
+        intermediate_files.append(intermediate_file)
+
+    # Merge intermediate files
+    final_merger = PdfMerger()
+    for intermediate_file in intermediate_files:
+        final_merger.append(intermediate_file)
+
+    final_merger.write("result.pdf")
+    final_merger.close()
 
 # Dynamic distribution using queue
 page_queue = queue.Queue()
@@ -166,17 +199,17 @@ def download_thread():
             page_queue.task_done()
 
 # Start download threads
-threads = []
-for _ in range(NUM_THREADS):
-    thread = threading.Thread(target=download_thread)
-    thread.start()
-    threads.append(thread)
+# threads = []
+# for _ in range(NUM_THREADS):
+#     thread = threading.Thread(target=download_thread)
+#     thread.start()
+#     threads.append(thread)
 
 # Wait for all downloads to complete
-for thread in threads:
-    thread.join()
+#for thread in threads:
+#   thread.join()
 
-print("Download Complete")
+# print("Download Complete")
 
 # Convert pages with dynamic distribution
 page_queue = queue.Queue()
